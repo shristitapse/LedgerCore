@@ -1,122 +1,399 @@
 # LedgerCore
 
-LedgerCore is a Spring Boot REST API for double-entry bookkeeping. It stores balances as a function of completed ledger entries rather than as a manually maintained running total, and it supports account management, transaction validation, idempotency, reversal, and transaction history.
+**A production-oriented double-entry ledger backend built with Spring Boot and PostgreSQL.**
 
-## Features
+LedgerCore is a REST API for managing financial accounts and processing double-entry transactions. Instead of maintaining a mutable balance, the system derives account balances from completed ledger entries, providing an auditable source of truth.
 
-- Account creation and lookup
-- Double-entry transaction processing
-- Debit/credit validation
-- Idempotent transaction handling
-- Transaction reversal
-- Balance calculation from completed entries
-- Transaction history by account
-- Pessimistic locking on accounts during updates
-- Centralized exception handling
-- Swagger/OpenAPI documentation
-- Integration testing against the local PostgreSQL test database
+The project focuses on backend engineering concerns commonly found in financial systems: **transaction integrity, idempotency, concurrency control, reversals, database consistency, and integration testing.**
 
-## Architecture
+---
+
+## ✨ Key Features
+
+* **Double-entry bookkeeping** — every transaction must balance debits and credits.
+* **Idempotent transactions** — prevents duplicate transactions when requests are retried.
+* **Transaction reversals** — reverses completed transactions without deleting ledger history.
+* **Derived balances** — balances are calculated from ledger entries rather than stored as mutable state.
+* **Pessimistic locking** — locks accounts during transaction processing to protect concurrent updates.
+* **Deterministic lock ordering** — accounts are locked in UUID order to reduce deadlock risk.
+* **Transaction history** — retrieve transactions associated with an account.
+* **Centralized error handling** — consistent JSON error responses through a global exception handler.
+* **PostgreSQL persistence** — relational storage using Spring Data JPA and Hibernate.
+* **Integration testing** — REST API tested against a dedicated PostgreSQL test database.
+* **OpenAPI documentation** — interactive API documentation through Swagger UI.
+
+---
+
+## 🏗️ Architecture
 
 ```text
-Controller
-    |
-Service
-    |
-Repository
-    |
-PostgreSQL
+                    HTTP Request
+                         │
+                         ▼
+                ┌─────────────────┐
+                │   Controllers   │
+                │ REST API Layer  │
+                └────────┬────────┘
+                         │
+                         ▼
+                ┌─────────────────┐
+                │    Services     │
+                │ Business Logic  │
+                └────────┬────────┘
+                         │
+                         ▼
+                ┌─────────────────┐
+                │   Repositories  │
+                │   Spring Data   │
+                └────────┬────────┘
+                         │
+                         ▼
+                ┌─────────────────┐
+                │   PostgreSQL    │
+                │    Database     │
+                └─────────────────┘
 ```
 
-- Controller: exposes the REST API and maps requests to service methods.
-- Service: contains validation, locking, balance logic, reversal logic, and idempotency behavior.
-- Repository: persists and queries accounts, transactions, and entries via Spring Data JPA.
-- PostgreSQL: stores the application data in the local ledger database.
+### Project Structure
 
-## Tech Stack
-
-- Java 21
-- Spring Boot 4.1.1
-- Spring Data JPA
-- Hibernate ORM
-- PostgreSQL
-- Maven
-- JUnit 5
-- Springdoc OpenAPI
-
-## PostgreSQL Setup
-
-PostgreSQL is expected to be running locally. The application uses the following databases:
-
-- ledgercore
-- ledgercore_test
-
-No Docker or Testcontainers are used.
-
-Example local configuration:
-
-```properties
-spring.datasource.url=jdbc:postgresql://localhost:5432/ledgercore
-spring.datasource.username=postgres
-spring.datasource.password=YOUR_PASSWORD
-spring.jpa.hibernate.ddl-auto=update
+```text
+src/main/java/com/ledgercore
+│
+├── controller/
+│   ├── AccountController.java
+│   └── TransactionController.java
+│
+├── service/
+│   ├── AccountService.java
+│   └── LedgerService.java
+│
+├── repository/
+│   ├── AccountRepository.java
+│   ├── EntryRepository.java
+│   └── LedgerTransactionRepository.java
+│
+├── entity/
+│   ├── Account.java
+│   ├── Entry.java
+│   ├── LedgerTransaction.java
+│   ├── EntryType.java
+│   └── TransactionStatus.java
+│
+├── dto/
+│   ├── CreateAccountRequest.java
+│   ├── CreateTransactionRequest.java
+│   ├── AccountResponse.java
+│   ├── TransactionResponse.java
+│   └── BalanceResponse.java
+│
+└── exception/
+    ├── GlobalExceptionHandler.java
+    └── custom exceptions
 ```
 
-The test profile points to the test database automatically through src/test/resources/application-test.properties.
+---
 
-## Running the Application
+## 🛠️ Tech Stack
 
-```powershell
-.\mvnw.cmd spring-boot:run
+| Technology        | Purpose                       |
+| ----------------- | ----------------------------- |
+| Java 21           | Backend language              |
+| Spring Boot 4.1.1 | REST API framework            |
+| Spring Data JPA   | Database access               |
+| Hibernate ORM     | Persistence / ORM             |
+| PostgreSQL        | Relational database           |
+| Maven             | Build & dependency management |
+| JUnit 5           | Testing                       |
+| Springdoc OpenAPI | API documentation             |
+
+---
+
+## 🔄 Transaction Flow
+
+A typical transfer between two accounts follows this flow:
+
+```text
+Client
+  │
+  │ POST /transactions
+  ▼
+TransactionController
+  │
+  ▼
+LedgerService
+  │
+  ├── Check idempotency key
+  │
+  ├── Validate debit/credit totals
+  │
+  ├── Load and lock accounts
+  │
+  ├── Lock accounts in deterministic UUID order
+  │
+  ├── Create LedgerTransaction
+  │
+  ├── Create Entry records
+  │
+  └── Commit transaction
+          │
+          ▼
+      PostgreSQL
 ```
 
-The app runs on port 8080.
+For example:
 
-## Running Tests
+```text
+Wallet       DEBIT     1000
+Savings      CREDIT    1000
+```
+
+The transaction is valid because:
+
+```text
+Total Debit  = 1000
+Total Credit = 1000
+```
+
+Multi-entry transactions are also supported:
+
+```text
+Wallet       DEBIT     1000
+Savings      CREDIT     600
+Checking     CREDIT     400
+```
+
+---
+
+## 💰 Balance Calculation
+
+LedgerCore does not maintain a manually updated `balance` field.
+
+Instead:
+
+```text
+Balance = Total Credits - Total Debits
+```
+
+Only entries belonging to `COMPLETED` transactions participate in the calculation.
+
+This makes the ledger entries the source of truth and avoids maintaining another mutable value that could become inconsistent with the transaction history.
+
+---
+
+## 🔁 Transaction Lifecycle
+
+Normal transaction:
+
+```text
+PENDING
+   │
+   ▼
+COMPLETED
+```
+
+Reversal:
+
+```text
+COMPLETED
+   │
+   ▼
+REVERSED
+   │
+   └──► New reversal transaction
+```
+
+A reversal does **not** delete the original transaction.
+
+Instead, LedgerCore:
+
+1. Marks the original transaction as `REVERSED`.
+2. Creates a new transaction.
+3. Generates opposite entries.
+4. Links the reversal using `reversedTransactionId`.
+
+Example:
+
+```text
+Original:
+
+Wallet       DEBIT     1000
+Bank         CREDIT    1000
+
+
+Reversal:
+
+Wallet       CREDIT    1000
+Bank         DEBIT     1000
+```
+
+This preserves the complete audit trail.
+
+---
+
+## 🔐 Idempotency
+
+Every transaction requires an `idempotencyKey`.
+
+If a client retries the same request:
+
+```text
+Request 1 → txn-001 → Transaction A created
+Request 2 → txn-001 → Transaction A returned
+```
+
+A second transaction is not created.
+
+The database also enforces uniqueness on the idempotency key, providing an additional layer of protection against duplicate ledger operations.
+
+---
+
+## 🔒 Concurrency Control
+
+Financial transactions can be processed concurrently, so LedgerCore uses **pessimistic database locking** when modifying accounts.
+
+To reduce deadlock risk, multiple accounts are always locked in a deterministic UUID order.
+
+Conceptually:
+
+```text
+Request A                 Request B
+   │                         │
+   ▼                         ▼
+Lock Account A          Lock Account A
+   │                         │
+   ▼                         │
+Lock Account B              waits
+   │
+   ▼
+Commit
+   │
+   ▼
+Release locks
+                             │
+                             ▼
+                        Lock Account B
+```
+
+This avoids two concurrent transactions acquiring the same account locks in different orders.
+
+---
+
+## 🌐 REST API
+
+### Accounts
+
+| Method | Endpoint                      | Description                     |
+| ------ | ----------------------------- | ------------------------------- |
+| `POST` | `/accounts`                   | Create an account               |
+| `GET`  | `/accounts`                   | List all accounts               |
+| `GET`  | `/accounts/{id}`              | Get an account                  |
+| `GET`  | `/accounts/{id}/balance`      | Calculate account balance       |
+| `GET`  | `/accounts/{id}/transactions` | Get account transaction history |
+
+### Transactions
+
+| Method | Endpoint                     | Description                     |
+| ------ | ---------------------------- | ------------------------------- |
+| `POST` | `/transactions`              | Create a ledger transaction     |
+| `GET`  | `/transactions/{id}`         | Get transaction details         |
+| `POST` | `/transactions/{id}/reverse` | Reverse a completed transaction |
+
+---
+
+## 📖 API Documentation
+
+Once the application is running, the complete API can be explored interactively through Swagger UI:
+
+**Swagger UI**
+
+`http://localhost:8080/swagger-ui.html`
+
+**OpenAPI specification**
+
+`http://localhost:8080/v3/api-docs`
+
+Swagger provides request/response schemas and allows the endpoints to be tested directly from the browser.
+
+---
+
+## 🧪 Testing
+
+The project contains integration tests that exercise the actual REST API against a dedicated local PostgreSQL test database.
+
+The test suite covers:
+
+* Account creation
+* Account retrieval
+* Transaction creation
+* Double-entry validation
+* Invalid transaction handling
+* Idempotency
+* Transaction reversal
+* Balance calculation
+* Transaction history
+* Error handling
+
+Latest verification:
+
+```text
+30 tests
+0 failures
+0 errors
+0 skipped
+
+BUILD SUCCESS
+```
+
+Run the test suite with:
 
 ```powershell
 .\mvnw.cmd clean test
 ```
 
-The integration tests use the local PostgreSQL test database and do not rely on Docker or Testcontainers.
+---
 
-## Swagger / OpenAPI
+## 🚀 Running Locally
 
-Swagger UI:
+### Prerequisites
 
-http://localhost:8080/swagger-ui.html
+* Java 21
+* PostgreSQL
+* Maven (or the included Maven Wrapper)
 
-OpenAPI JSON:
+Create the required PostgreSQL databases:
 
-http://localhost:8080/v3/api-docs
+```text
+ledgercore
+ledgercore_test
+```
 
-## API Overview
+Configure the application with environment variables:
 
-### Accounts
+```text
+DATABASE_URL
+DATABASE_USERNAME
+DATABASE_PASSWORD
+```
 
-- POST /accounts
-  - Create a new account
-- GET /accounts
-  - List all accounts
-- GET /accounts/{id}
-  - Get one account
-- GET /accounts/{id}/balance
-  - Get the balance for an account
-- GET /accounts/{id}/transactions
-  - Get transaction history for an account
+The application defaults to port `8080`.
 
-### Transactions
+Start the backend:
 
-- POST /transactions
-  - Create a balanced transaction with a unique idempotency key
-- GET /transactions/{id}
-  - Fetch a transaction by ID
-- POST /transactions/{id}/reverse
-  - Reverse a completed transaction and create an opposite transaction
+```powershell
+.\mvnw.cmd spring-boot:run
+```
 
-### Example JSON
+The API will be available at:
 
-Create account:
+```text
+http://localhost:8080
+```
+
+---
+
+## 📌 Example Requests
+
+### Create an Account
 
 ```json
 {
@@ -124,195 +401,43 @@ Create account:
 }
 ```
 
-Create balanced transaction:
+### Create a Transaction
 
 ```json
 {
   "idempotencyKey": "txn-001",
   "entries": [
     {
-      "accountId": "11111111-1111-1111-1111-111111111111",
-      "amount": 100,
+      "accountId": "ACCOUNT_UUID_1",
+      "amount": 1000,
       "type": "DEBIT"
     },
     {
-      "accountId": "22222222-2222-2222-2222-222222222222",
-      "amount": 100,
+      "accountId": "ACCOUNT_UUID_2",
+      "amount": 1000,
       "type": "CREDIT"
     }
   ]
 }
 ```
 
-## Double-Entry Explanation
-
-A valid transaction balances both sides of the ledger.
-
-Example:
-
-- Wallet DEBIT 100
-- Savings CREDIT 100
-
-This means:
-
-- Total debit = 100
-- Total credit = 100
-
-The API rejects transactions where totals differ.
-
-## Idempotency Explanation
-
-Each transaction includes an idempotency key. If the same request is retried, the service returns the original transaction instead of creating another one. This prevents duplicate ledger entries when clients retry after network failures or timeouts.
-
-## Reversal Explanation
-
-A reversal does not delete the original transaction. Instead:
-
-- the original transaction is marked as REVERSED
-- a new reversal transaction is created with opposite entry directions
-- the reversal transaction is linked back through reversedTransactionId
-
-## Balance Explanation
-
-The balance is calculated from completed ledger entries. It is not maintained as a separate stored balance field. The repository sums credit entries and subtracts debit entries for the given account, while excluding pending transactions.
-
-## Testing
-
-The project includes integration tests that exercise the real REST API against the local PostgreSQL test database. The tests validate account creation, transaction creation, invalid inputs, reversal behavior, idempotency, history ordering, and balance calculation.
-
-Get one account:
-
-```powershell
-Invoke-RestMethod `
-    -Uri "http://localhost:8080/accounts/ACCOUNT_UUID" `
-    -Method GET
-```
-
-Create a transaction:
-
-```powershell
-$body = @{
-    idempotencyKey = "txn-001"
-    entries = @(
-        @{
-            accountId = "ACCOUNT_UUID_1"
-            amount = 1000
-            type = "DEBIT"
-        },
-        @{
-            accountId = "ACCOUNT_UUID_2"
-            amount = 1000
-            type = "CREDIT"
-        }
-    )
-} | ConvertTo-Json -Depth 5
-
-Invoke-RestMethod `
-    -Uri "http://localhost:8080/transactions" `
-    -Method POST `
-    -ContentType "application/json" `
-    -Body $body
-```
-
-Get balance:
-
-```powershell
-Invoke-RestMethod `
-    -Uri "http://localhost:8080/accounts/ACCOUNT_UUID/balance" `
-    -Method GET
-```
-
-Get a transaction:
-
-```powershell
-Invoke-RestMethod `
-    -Uri "http://localhost:8080/transactions/TRANSACTION_UUID" `
-    -Method GET
-```
-
-Get transaction history:
-
-```powershell
-Invoke-RestMethod `
-    -Uri "http://localhost:8080/accounts/ACCOUNT_UUID/transactions" `
-    -Method GET
-```
-
-Reverse a transaction:
-
-```powershell
-Invoke-RestMethod `
-    -Uri "http://localhost:8080/transactions/TRANSACTION_UUID/reverse" `
-    -Method POST
-```
-
-## Double-Entry Explanation
-
-Every transaction must have at least one `DEBIT` and one `CREDIT`.
-
-Total `DEBIT` amount must equal total `CREDIT` amount.
-
-Valid:
+### Get Balance
 
 ```text
-Wallet  DEBIT   1000
-Savings CREDIT  1000
+GET /accounts/{accountId}/balance
 ```
 
-Valid multi-entry transaction:
+### Reverse a Transaction
 
 ```text
-Wallet   DEBIT   1000
-Savings  CREDIT   600
-Checking CREDIT   400
+POST /transactions/{transactionId}/reverse
 ```
 
-Invalid:
+---
 
-```text
-Wallet  DEBIT   1000
-Savings CREDIT   900
-```
+## ⚠️ Error Handling
 
-## Transaction Lifecycle
-
-New ledger transactions begin as:
-
-```text
-PENDING -> COMPLETED
-```
-
-Completed transactions can be reversed:
-
-```text
-COMPLETED -> REVERSED
-```
-
-Reversal creates a new transaction with opposite entries. If the original entry is a debit, the reversal entry is a credit for the same account and amount. If the original entry is a credit, the reversal entry is a debit.
-
-## Idempotency
-
-Idempotency keys protect clients from accidentally creating duplicate transactions when a request is retried.
-
-For example, sending `txn-001` twice should return the same transaction instead of creating two separate transactions. The database also enforces uniqueness for transaction idempotency keys.
-
-## Balance
-
-Balance is calculated as:
-
-```text
-Balance = total CREDIT - total DEBIT
-```
-
-Only `COMPLETED` transactions participate in balance calculations. `PENDING` and `REVERSED` transactions are excluded.
-
-## Concurrency
-
-LedgerCore locks accounts pessimistically before creating or reversing transactions. Accounts are locked in deterministic UUID order so concurrent requests acquire locks consistently and reduce the risk of deadlocks.
-
-## Error Handling
-
-Errors are returned through a centralized `ErrorResponse` shape:
+Errors are returned through a consistent response structure:
 
 ```json
 {
@@ -324,4 +449,26 @@ Errors are returned through a centralized `ErrorResponse` shape:
 }
 ```
 
-Stack traces are not returned to clients.
+Internal stack traces are not exposed through the API.
+
+---
+
+## 🎯 Engineering Focus
+
+LedgerCore was designed around backend concepts that are important in systems handling financial data:
+
+* Data consistency
+* Atomic database transactions
+* Double-entry accounting
+* Idempotent APIs
+* Concurrency control
+* Pessimistic locking
+* Deadlock prevention
+* Auditability
+* Database-backed source of truth
+* Integration testing
+* REST API design
+
+
+
+
